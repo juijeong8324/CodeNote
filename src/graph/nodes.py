@@ -3,9 +3,10 @@ import os
 import re
 from pathlib import Path
 
-from langchain_anthropic import ChatAnthropic
+#from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 
 from src.graph.state import (
@@ -14,19 +15,38 @@ from src.graph.state import (
     ProblemAnalysis,
     ProblemResult,
 )
-from src.mcp.config import github_mcp_config
+from src.mcp.config import github_mcp_config # Get MCP setting
 from src.utils.retry import agent_retry
 
 logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
-# models
-_llm = ChatAnthropic(model="claude-opus-4-6")
-_llm_thinking = ChatAnthropic(model="claude-opus-4-6", thinking={"type": "adaptive"})
+# ====================== Set LLM ======================
+# _llm = ChatAnthropic(model="claude-opus-4-6")
+# _llm_thinking = ChatAnthropic(model="claude-opus-4-6", thinking={"type": "adaptive"})
+
+_llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",   # 가장 빠르고 저렴
+    # model="gemini-2.5-flash",              # 대안 (조금 더 안정적)
+    temperature=0.1,
+    max_tokens=8192,
+    google_api_key=os.getenv("GEMINI_API_KEY"),
+)
+
+# Thinking / 깊은 분석용
+_llm_thinking = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
+    temperature=0.15,
+    max_tokens=16384,
+    # Gemini는 thinking_budget으로 제어 (adaptive 비슷한 효과)
+    thinking_budget=-1,   # 동적 thinking (Gemini 2.5/3.1 지원 시)
+    google_api_key=os.getenv("GEMINI_API_KEY"),
+)
 
 
-# prompts
+
+# ====================== Prompts ======================
 
 def load_prompt(name: str) -> str:
     return (_PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8").strip()
@@ -38,7 +58,7 @@ _MARKDOWN_WRITER_PROMPT = load_prompt("markdown_writer")
 _GITHUB_PUBLISHER_PROMPT = load_prompt("github_publisher")
 
 
-# helpers
+# ====================== Helpers ======================
 
 _NOTE_FILENAME = os.getenv("NOTE_FILENAME", "Solution.md")
 
@@ -58,11 +78,8 @@ def _lang(filename: str) -> str:
 def _get_filename(file_url: str) -> str:
     return file_url.rstrip("/").split("/")[-1]
 
-
+# Folder Grouping
 def _extract_folder(file_url: str) -> str:
-    """Extract folder path from file_url, excluding branch.
-    e.g. .../blob/main/DP/10_Problem/main.py -> DP/10_Problem
-    """
     if "/blob/" in file_url:
         after_blob = file_url.split("/blob/", 1)[1]
         path = after_blob.split("/", 1)[1] if "/" in after_blob else after_blob
@@ -81,12 +98,11 @@ def _extract_repo_info(repo_url: str) -> tuple[str, str]:
 
 
 def _pick_primary(files: list[FileContent]) -> FileContent:
-    """Select primary file for analysis: Python first, then C++, then first file."""
     for target in ("py", "cpp"):
         for f in files:
             if f["filename"].endswith(f".{target}"):
                 return f
-    return files[0]
+    return files[0] if files else None
 
 
 def _parse_multi_file_review(raw: str) -> list[FileContent]:
@@ -134,7 +150,7 @@ def _parse_multi_file_review(raw: str) -> list[FileContent]:
 
 @agent_retry(max_attempts=3)
 async def _invoke_agent(agent, message: str) -> str:
-    result = await agent.ainvoke({"messages": [("user", message)]})
+    result = await agent.ainvoke({"messages": [HumanMessage(content=message)]})
     return result["messages"][-1].content
 
 
@@ -177,8 +193,10 @@ async def code_analyzer_node(state: ProblemAnalysis) -> dict:
     try:
         # Step 1: Read all files via GitHub MCP
         file_list = "\n".join(f"- {url}" for url in state["file_urls"])
+
+        # EKS 배포에 적합한 Remote MCP 사용
         async with MultiServerMCPClient({"github": github_mcp_config()}) as client:
-            tools = client.get_tools()
+            tools = await client.get_tools() # add Await
             agent = create_react_agent(_llm, tools, state_modifier=_CODE_REVIEWER_PROMPT)
             raw = await _invoke_agent(
                 agent,
@@ -299,7 +317,7 @@ async def github_publisher_node(state: CodeNoteState) -> CodeNoteState:
         ])
 
         async with MultiServerMCPClient({"github": github_mcp_config()}) as client:
-            tools = client.get_tools()
+            tools = await client.get_tools()
             agent = create_react_agent(_llm, tools, state_modifier=_GITHUB_PUBLISHER_PROMPT)
             await _invoke_agent(
                 agent,

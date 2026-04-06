@@ -73,7 +73,7 @@ class CodeNoteResponse(BaseModel):
     summary: str
     error: str | None = None
 
-# ---------- Features1: ----------
+# ---------- EndPoints ----------
 
 @app.get("/health")
 async def health_check():
@@ -118,14 +118,16 @@ async def create_note(request: CodeNoteRequest):
 async def github_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_hub_signature_256: str | None = Header(None),
-    x_github_event: str | None = Header(None),
+    x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
+    x_github_event: str | None = Header(None, alias="X-GitHub-Event"),
 ):
     body = await request.body()
 
+    # 1. Signature 검증 (보안 필수)
     if x_hub_signature_256 and not _verify_signature(body, x_hub_signature_256):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
+    # 2. Push 이벤트만 처리
     if x_github_event != "push":
         return {"status": "ignored", "event": x_github_event}
 
@@ -133,15 +135,25 @@ async def github_webhook(
     repo_url = payload.get("repository", {}).get("html_url", "")
     branch = payload.get("ref", "refs/heads/main").split("/")[-1]
 
-    # Check Commit messeage
+    # 3. 변경된 파일 수집 (added)
     changed_files: list[str] = []
     for commit in payload.get("commits", []):
         changed_files.extend(commit.get("added", []))
+    
+    # 중복 제거
     changed_files = list(dict.fromkeys(changed_files))
 
-    if not changed_files:
-        return {"status": "no files changed"}
+    # 4. 불필요한 파일 필터링 (예: .md, .png 등 제외)
+    ignore_ext = {".md", ".png", ".jpg", ".jpeg", ".gif", ".pdf"}
+    changed_files = [
+        f for f in changed_files 
+        if not any(f.lower().endswith(ext) for ext in ignore_ext)
+    ]
 
+    if not changed_files:
+        return {"status": "no files changed", "reason": "no code files changed"}
+
+    # 5. State 구성
     initial_state: CodeNoteState = {
         "repo_url": repo_url,
         "branch": branch,
@@ -149,11 +161,16 @@ async def github_webhook(
         "analyzed": [],
         "results": [],
     }
-
+    # 백그라운드로 실행 (응답 빠르게 반환)
     background_tasks.add_task(_run_workflow, initial_state)
-    logger.info("워크플로우 예약: %d개 파일", len(changed_files))
+    logger.info("Webhook accepted → %d code files scheduled | repo=%s branch=%s", 
+                len(changed_files), repo_url, branch)
 
-    return {"status": "accepted", "files": len(changed_files)}
+    return {
+        "status": "accepted", 
+        "files": len(changed_files),
+        "branch": branch
+    }
 
 
 # main
