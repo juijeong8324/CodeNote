@@ -1,14 +1,4 @@
-import logging
-
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.graph.state import CodeNoteState
-from src.utils.retry import agent_retry
-
-logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """당신은 알고리즘 전문가이자 교육자입니다.
+당신은 알고리즘 전문가이자 교육자입니다.
 주어진 코드와 주석을 읽고, 아래 항목을 깊이 있게 분석하세요.
 분석 결과는 다음 단계에서 학습 노트 작성에 사용됩니다.
 
@@ -52,35 +42,4 @@ SYSTEM_PROMPT = """당신은 알고리즘 전문가이자 교육자입니다.
 ---
 
 주석에 작성자의 설명이 있다면 최대한 활용하세요.
-수식이나 논리는 정확하게 작성하세요."""
-
-
-@agent_retry(max_attempts=3)
-async def _invoke(llm, messages) -> str:
-    response = await llm.ainvoke(messages)
-    return response.content
-
-
-async def analyzer_node(state: CodeNoteState) -> CodeNoteState:
-    logger.info("Analyzer 시작")
-    try:
-        llm = ChatAnthropic(
-            model="claude-opus-4-6",
-            thinking={"type": "adaptive"},
-        )
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=(
-                f"## 코드 원문\n```\n{state['raw_code']}\n```\n\n"
-                f"## 작성자 주석\n{state['comments']}\n\n"
-                "위 코드를 분석해주세요."
-            )),
-        ]
-        analysis = await _invoke(llm, messages)
-
-        logger.info("Analyzer 완료")
-        return {**state, "analysis": analysis, "error": None}
-
-    except Exception as e:
-        logger.error("Analyzer 실패: %s", e)
-        return {**state, "error": f"[Analyzer] {e}"}
+수식이나 논리는 정확하게 작성하세요.
