@@ -20,7 +20,6 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
 
 HOST = "0.0.0.0"
 PORT = "8080"
@@ -53,37 +52,28 @@ def _verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-async def _run_workflow(github_url: str) -> None:
-    state: CodeNoteState = {
-        "github_url": github_url,
-        "notion_database_id": NOTION_DATABASE_ID,
-        "raw_code": None,
-        "comments": None,
-        "analysis": None,
-        "markdown_note": None,
-        "error": None,
-    }
+async def _run_workflow(state: CodeNoteState) -> None:
     result = await codenote_graph.ainvoke(state)
-    if result.get("error"):
-        logger.error("워크플로우 실패 [%s]: %s", github_url, result["error"])
+    errors = [r for r in result.get("results", []) if r.get("error")]
+    if errors:
+        for e in errors:
+            logger.error("워크플로우 실패 [%s]: %s", e["file_url"], e["error"])
     else:
-        logger.info("노트 생성 완료: %s", github_url)
+        logger.info("노트 생성 완료: %d개 파일", len(result.get("results", [])))
 
 # ---------- Models ----------
 
 class CodeNoteRequest(BaseModel):
     github_url: str
-    notion_database_id: str
 
 
 class CodeNoteResponse(BaseModel):
     success: bool
     title: str
-    notion_database_id: str
     summary: str
     error: str | None = None
 
-# ---------- Routes ----------
+# ---------- Features1: ----------
 
 @app.get("/health")
 async def health_check():
@@ -92,30 +82,34 @@ async def health_check():
 
 @app.post("/api/v1/notes", response_model=CodeNoteResponse)
 async def create_note(request: CodeNoteRequest):
-    logger.info("학습 노트 생성 요청: %s", request.github_url)
+    logger.info("Request Code Note: %s", request.github_url)
+
+    parts = request.github_url.split("/blob/")
+    repo_url = parts[0] if len(parts) == 2 else request.github_url
+    rest = parts[1] if len(parts) == 2 else ""
+    branch = rest.split("/")[0] if rest else "main"
 
     initial_state: CodeNoteState = {
-        "github_url": request.github_url,
-        "notion_database_id": request.notion_database_id,
-        "raw_code": None,
-        "comments": None,
-        "analysis": None,
-        "markdown_note": None,
-        "error": None,
+        "repo_url": repo_url,
+        "branch": branch,
+        "files": [request.github_url],
+        "analyzed": [],
+        "results": [],
     }
 
     final_state: CodeNoteState = await codenote_graph.ainvoke(initial_state)
 
-    if final_state.get("error"):
-        raise HTTPException(status_code=500, detail=final_state["error"])
+    results = final_state.get("results", [])
+    if not results or results[0].get("error"):
+        error = results[0].get("error") if results else "Unknown error"
+        raise HTTPException(status_code=500, detail=error)
 
-    note = final_state.get("markdown_note", "")
+    note = results[0].get("markdown_note", "")
     title = request.github_url.rstrip("/").split("/")[-1].rsplit(".", 1)[0]
 
     return CodeNoteResponse(
         success=True,
         title=title,
-        notion_database_id=request.notion_database_id,
         summary=note[:300] + "..." if len(note) > 300 else note,
     )
 
@@ -139,19 +133,25 @@ async def github_webhook(
     repo_url = payload.get("repository", {}).get("html_url", "")
     branch = payload.get("ref", "refs/heads/main").split("/")[-1]
 
+    # Check Commit messeage
     changed_files: list[str] = []
     for commit in payload.get("commits", []):
         changed_files.extend(commit.get("added", []))
-        changed_files.extend(commit.get("modified", []))
     changed_files = list(dict.fromkeys(changed_files))
 
     if not changed_files:
         return {"status": "no files changed"}
 
-    for file_path in changed_files:
-        file_url = f"{repo_url}/blob/{branch}/{file_path}"
-        background_tasks.add_task(_run_workflow, file_url)
-        logger.info("워크플로우 예약: %s", file_url)
+    initial_state: CodeNoteState = {
+        "repo_url": repo_url,
+        "branch": branch,
+        "files": [f"{repo_url}/blob/{branch}/{fp}" for fp in changed_files],
+        "analyzed": [],
+        "results": [],
+    }
+
+    background_tasks.add_task(_run_workflow, initial_state)
+    logger.info("워크플로우 예약: %d개 파일", len(changed_files))
 
     return {"status": "accepted", "files": len(changed_files)}
 

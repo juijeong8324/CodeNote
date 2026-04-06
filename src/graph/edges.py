@@ -1,17 +1,27 @@
 import logging
 
-from langgraph.graph import END
+from langgraph.types import Send
 
-from src.graph.state import CodeNoteState
+from src.graph.state import CodeNoteState, ProblemAnalysis
 
 logger = logging.getLogger(__name__)
 
 
-def route_or_end(next_node: str):
-    """에러가 있으면 END로, 없으면 next_node로 라우팅."""
-    def _route(state: CodeNoteState) -> str:
-        if state.get("error"):
-            logger.error("워크플로우 중단 — %s", state["error"])
-            return END
-        return next_node
-    return _route
+def fan_out_to_analyzers(state: CodeNoteState):
+    return [
+        Send("code_analyzer", ProblemAnalysis(
+            folder=p["folder"],
+            file_urls=p["file_urls"],
+            files=None,
+            analysis=None,
+            error=None,
+        ))
+        for p in state["problems"]
+    ]
+
+
+def chain_to_doc_writer(state: dict):
+    analyzed = state.get("analyzed", [])
+    if not analyzed or analyzed[0].get("error"):
+        return []
+    return [Send("doc_writer", analyzed[0])]

@@ -1,11 +1,36 @@
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
+
+
+class ProblemGroup(TypedDict):
+    folder: str            # "Dynamic Programming/leetCode/10_Regular Expression Matching"
+    file_urls: list[str]   # [main.py url, main.cpp url, ...]
+
+
+class FileContent(TypedDict):
+    filename: str  # "main.py" — language derived from extension
+    raw_code: str
+    comments: str
+
+
+class ProblemAnalysis(TypedDict):
+    folder: str
+    file_urls: list[str]
+    files: list[FileContent] | None   
+    analysis: str | None
+    error: str | None
+
+
+class ProblemResult(TypedDict):
+    folder: str
+    markdown_note: str | None
+    error: str | None
 
 
 class CodeNoteState(TypedDict):
-    github_url: str
-    notion_database_id: str   # Notion Database ID (고정값, 환경변수로 관리)
-    raw_code: str | None      # code_reviewer: 코드 원문
-    comments: str | None      # code_reviewer: 추출한 주석
-    analysis: str | None      # analyzer: 알고리즘 분석 결과
-    markdown_note: str | None # markdown_writer: 완성된 학습 노트
-    error: str | None
+    repo_url: str
+    branch: str
+    files: list[str]                                       
+    problems: list[ProblemGroup]                           
+    analyzed: Annotated[list[ProblemAnalysis], operator.add]
+    results: Annotated[list[ProblemResult], operator.add]
